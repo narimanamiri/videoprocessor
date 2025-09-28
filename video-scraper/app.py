@@ -11,13 +11,16 @@ class VideoHandler(FileSystemEventHandler):
         self.processing_dir = processing_dir
         self.n8n_webhook_url = n8n_webhook_url
         self.supported_formats = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
+        self.processed_files = set()
 
     def on_created(self, event):
         if event.is_directory:
             return
         
         file_path = Path(event.src_path)
-        if file_path.suffix.lower() in self.supported_formats:
+        if (file_path.suffix.lower() in self.supported_formats and 
+            file_path.name not in self.processed_files):
+            
             print(f"New video detected: {file_path}")
             self.process_video(file_path)
 
@@ -25,21 +28,25 @@ class VideoHandler(FileSystemEventHandler):
         # Move to processing directory
         processing_path = Path(self.processing_dir) / video_path.name
         try:
+            # Wait a bit for file to be completely written
+            time.sleep(2)
             video_path.rename(processing_path)
+            self.processed_files.add(video_path.name)
             print(f"Moved video to processing: {processing_path}")
             
             # Send to n8n workflow
             payload = {
                 "video_path": str(processing_path),
                 "video_name": processing_path.name,
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "status": "detected"
             }
             
             try:
                 response = requests.post(
                     self.n8n_webhook_url,
                     json=payload,
-                    timeout=10
+                    timeout=30
                 )
                 print(f"Sent to n8n workflow: {response.status_code}")
             except Exception as e:
@@ -57,6 +64,11 @@ def main():
     # Create directories if they don't exist
     Path(input_dir).mkdir(parents=True, exist_ok=True)
     Path(processing_dir).mkdir(parents=True, exist_ok=True)
+    
+    print(f"Video Scraper Configuration:")
+    print(f"Input Directory: {input_dir}")
+    print(f"Processing Directory: {processing_dir}")
+    print(f"N8N Webhook URL: {n8n_webhook_url}")
     
     event_handler = VideoHandler(processing_dir, n8n_webhook_url)
     observer = Observer()

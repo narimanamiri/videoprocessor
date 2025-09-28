@@ -1,8 +1,12 @@
 import os
 import json
 import requests
+import time
 from pathlib import Path
 import ffmpeg
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
 
 class VideoProcessor:
     def __init__(self, processing_dir, output_dir, n8n_webhook_url):
@@ -10,11 +14,17 @@ class VideoProcessor:
         self.output_dir = Path(output_dir)
         self.n8n_webhook_url = n8n_webhook_url
         
+        # Create directories
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
     def get_video_duration(self, video_path):
         try:
             probe = ffmpeg.probe(str(video_path))
-            duration = float(probe['streams'][0]['duration'])
-            return duration
+            video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+            if video_stream:
+                duration = float(video_stream.get('duration', 0))
+                return duration
+            return None
         except Exception as e:
             print(f"Error getting video duration: {e}")
             return None
@@ -22,6 +32,9 @@ class VideoProcessor:
     def process_video(self, video_path):
         try:
             video_path = Path(video_path)
+            if not video_path.exists():
+                raise FileNotFoundError(f"Video file not found: {video_path}")
+                
             duration = self.get_video_duration(video_path)
             
             if duration is None:
@@ -47,20 +60,19 @@ class VideoProcessor:
                 "processed_path": str(output_path),
                 "duration": duration,
                 "video_type": video_type,
-                "output_filename": output_filename
+                "output_filename": output_filename,
+                "status": "processed"
             }
-            
-            # Send to next step in n8n workflow
-            self.send_to_next_step(result)
             
             return result
             
         except Exception as e:
             print(f"Error processing video: {e}")
-            return None
+            return {"error": str(e), "status": "error"}
     
     def process_shorts(self, input_path, output_path):
         # Process for YouTube Shorts - vertical 9:16
+        print(f"Processing as Shorts: {input_path} -> {output_path}")
         (
             ffmpeg
             .input(str(input_path))
@@ -76,6 +88,7 @@ class VideoProcessor:
     
     def process_standard(self, input_path, output_path):
         # Process for standard YouTube - horizontal 16:9
+        print(f"Processing as Standard: {input_path} -> {output_path}")
         (
             ffmpeg
             .input(str(input_path))
@@ -93,22 +106,52 @@ class VideoProcessor:
             response = requests.post(
                 self.n8n_webhook_url,
                 json=result,
-                timeout=10
+                timeout=30
             )
             print(f"Sent processed video to n8n: {response.status_code}")
+            return response.status_code
         except Exception as e:
             print(f"Failed to send to n8n: {e}")
+            return None
+
+# Initialize processor
+processor = VideoProcessor(
+    processing_dir=os.getenv('PROCESSING_DIR', '/app/processing'),
+    output_dir=os.getenv('OUTPUT_DIR', '/app/output'),
+    n8n_webhook_url=os.getenv('N8N_WEBHOOK_URL', 'http://n8n:5678/webhook/video-processed')
+)
+
+@app.route('/process', methods=['POST'])
+def process_video_endpoint():
+    try:
+        data = request.json
+        video_path = data.get('video_path')
+        
+        if not video_path:
+            return jsonify({"error": "No video_path provided"}), 400
+        
+        print(f"Processing video: {video_path}")
+        result = processor.process_video(video_path)
+        
+        if 'error' in result:
+            return jsonify(result), 500
+        
+        # Send to next step
+        processor.send_to_next_step(result)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy", "service": "video-processor"})
 
 def main():
-    processing_dir = os.getenv('PROCESSING_DIR', '/app/processing')
-    output_dir = os.getenv('OUTPUT_DIR', '/app/output')
-    n8n_webhook_url = os.getenv('N8N_WEBHOOK_URL', 'http://n8n:5678/webhook/video-processed')
-    
-    processor = VideoProcessor(processing_dir, output_dir, n8n_webhook_url)
-    
-    print("Video Processor started. Waiting for n8n triggers...")
-    
-    # This service will be triggered by n8n webhook
+    port = int(os.getenv('PORT', '5000'))
+    print(f"Video Processor started on port {port}. Waiting for requests...")
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 if __name__ == "__main__":
     main()

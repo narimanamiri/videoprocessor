@@ -10,7 +10,10 @@ services:
       - SCAN_INTERVAL=30
       - INPUT_DIR=/app/input
       - PROCESSING_DIR=/app/processing
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook/video-detected
     restart: unless-stopped
+    networks:
+      - video-network
 
   video-processor:
     build: ./video-processor
@@ -21,9 +24,11 @@ services:
       - PROCESSING_DIR=/app/processing
       - OUTPUT_DIR=/app/output
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/video-processed
+    restart: unless-stopped
+    networks:
+      - video-network
     depends_on:
       - n8n
-    restart: unless-stopped
 
   caption-generator:
     build: ./caption-generator
@@ -33,25 +38,31 @@ services:
     environment:
       - PROCESSING_DIR=/app/processing
       - OUTPUT_DIR=/app/output
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook/subtitles-generated
     restart: unless-stopped
+    networks:
+      - video-network
+    depends_on:
+      - n8n
 
   ai-caption-agent:
     build: ./ai-caption-agent
     volumes:
       - ./shared-storage/processing:/app/processing
       - ./shared-storage/output:/app/output
-      - ./ai-caption-agent/models:/app/models
+      - ai_models:/app/models
     environment:
-      - MODEL_PATH=/app/models/llama-2-7b-chat.q4_0.gguf
+      - OLLAMA_HOST=0.0.0.0:11434
       - PROCESSING_DIR=/app/processing
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - OUTPUT_DIR=/app/output
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook/captions-generated
+    ports:
+      - "11434:11434"
     restart: unless-stopped
+    networks:
+      - video-network
+    depends_on:
+      - n8n
 
   file-assembler:
     build: ./file-assembler
@@ -59,7 +70,12 @@ services:
       - ./shared-storage/output:/app/output
     environment:
       - OUTPUT_DIR=/app/output
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook/files-assembled
     restart: unless-stopped
+    networks:
+      - video-network
+    depends_on:
+      - n8n
 
   n8n:
     image: n8nio/n8n
@@ -72,7 +88,13 @@ services:
       - n8n_data:/home/node/.n8n
       - ./shared-storage:/home/node/.n8n/data
     restart: unless-stopped
+    networks:
+      - video-network
 
 volumes:
   n8n_data:
-  shared_storage:
+  ai_models:
+
+networks:
+  video-network:
+    driver: bridge
