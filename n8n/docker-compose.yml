@@ -1,18 +1,11 @@
-version: '3.8'
-
+version: '3'
 services:
   n8n:
-    image: n8nio/n8n
+    image: docker.n8n.io/n8nio/n8n:1.61.0
     ports:
       - "5678:5678"
     environment:
-      - N8N_BASIC_AUTH_ACTIVE=false
-      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
-      - N8N_ENDPOINT_WEBHOOK=https://your-domain.com/webhook
+      - GENERIC_TIMEZONE=Asia/Tehran
+      - TZ=Asia/Tehran
     volumes:
-      - n8n_data:/home/node/.n8n
-      - ../shared-storage:/data
-    restart: unless-stopped
-
-volumes:
-  n8n_data:
+      - ./n8n-data:/home/node/.n8n
