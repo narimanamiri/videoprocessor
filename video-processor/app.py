@@ -3,21 +3,36 @@ import threading
 from pathlib import Path
 
 import ffmpeg
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
-from common import get_logger, post_with_retry, env_int
+from common import (
+    get_logger,
+    post_with_retry,
+    env_int,
+    Metrics,
+    validate_video_input,
+    SUPPORTED_VIDEO_EXTENSIONS,
+)
 
 logger = get_logger("video-processor")
 app = Flask(__name__)
+metrics = Metrics("video-processor")
 
 # Formats we are willing to transcode. Anything else is rejected up front
 # instead of failing deep inside ffmpeg with a cryptic error.
-SUPPORTED_INPUT_FORMATS = {
-    ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
-}
+SUPPORTED_INPUT_FORMATS = set(SUPPORTED_VIDEO_EXTENSIONS)
 
 # Threshold (seconds) under which a video is treated as a vertical "short".
 SHORTS_THRESHOLD = env_int("SHORTS_DURATION_THRESHOLD", 60)
+
+# Optional hard cap on input size (MB). 0 = unlimited. Rejected before ffmpeg.
+MAX_VIDEO_SIZE_MB = env_int("MAX_VIDEO_SIZE_MB", 0)
+
+# Configurable output naming/format (FEATURE: output naming/format).
+#   OUTPUT_PREFIX    - filename prefix (default "processed_")
+#   OUTPUT_CONTAINER - container/extension without dot (default "mp4")
+OUTPUT_PREFIX = os.getenv("OUTPUT_PREFIX", "processed_")
+OUTPUT_CONTAINER = os.getenv("OUTPUT_CONTAINER", "mp4").lstrip(".").lower()
 
 
 class VideoProcessor:
@@ -117,16 +132,16 @@ class VideoProcessor:
         video_path = Path(video_path)
         name = video_path.name
         try:
-            if not video_path.exists():
-                raise FileNotFoundError(f"Video file not found: {video_path}")
-
-            if video_path.suffix.lower() not in SUPPORTED_INPUT_FORMATS:
-                raise ValueError(
-                    f"Unsupported input format '{video_path.suffix}'. "
-                    f"Supported: {sorted(SUPPORTED_INPUT_FORMATS)}"
-                )
+            ok, reason = validate_video_input(
+                video_path,
+                max_size_mb=MAX_VIDEO_SIZE_MB,
+                extensions=SUPPORTED_INPUT_FORMATS,
+            )
+            if not ok:
+                raise ValueError(reason)
 
             self._set_status(name, "processing")
+            metrics.inc("processor_jobs_total")
             metadata = self.probe_metadata(video_path)
             duration = metadata.get("duration")
 
@@ -135,7 +150,7 @@ class VideoProcessor:
 
             is_short = duration <= SHORTS_THRESHOLD
 
-            output_filename = f"processed_{video_path.stem}.mp4"
+            output_filename = f"{OUTPUT_PREFIX}{video_path.stem}.{OUTPUT_CONTAINER}"
             output_path = self.output_dir / output_filename
 
             if is_short:
@@ -163,12 +178,15 @@ class VideoProcessor:
             }
             self._set_status(name, "processed",
                              output=str(output_path), video_type=video_type)
+            metrics.inc("processor_processed_total")
+            metrics.inc(f"processor_{video_type}_total")
             logger.info("Processed %s as %s (%.1fs)",
                         name, video_type, duration)
             return result
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error processing video %s", video_path)
+            metrics.inc("processor_errors_total")
             self._set_status(name, "error", error=str(exc))
             return {"error": str(exc), "status": "error"}
 
@@ -219,6 +237,17 @@ def process_video_endpoint():
         if not video_path:
             return jsonify({"error": "No video_path provided"}), 400
 
+        # Validate up front so bad input is a clear 400, not a deep ffmpeg 500.
+        ok, reason = validate_video_input(
+            video_path,
+            max_size_mb=MAX_VIDEO_SIZE_MB,
+            extensions=SUPPORTED_INPUT_FORMATS,
+        )
+        if not ok:
+            metrics.inc("processor_rejected_total")
+            logger.warning("Rejected /process request: %s", reason)
+            return jsonify({"error": reason, "status": "rejected"}), 400
+
         logger.info("Processing request for: %s", video_path)
         result = processor.process_video(video_path)
 
@@ -243,6 +272,12 @@ def status_endpoint():
             return jsonify({"error": "unknown job", "name": name}), 404
         return jsonify({"name": name, **job})
     return jsonify({"jobs": processor.get_status()})
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics_endpoint():
+    metrics.set_gauge("processor_jobs_tracked", len(processor.get_status()))
+    return Response(metrics.render(), mimetype="text/plain; version=0.0.4")
 
 
 @app.route("/health", methods=["GET"])

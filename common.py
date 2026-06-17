@@ -8,18 +8,31 @@ It provides:
   * ``get_logger`` / ``configure_logging`` - structured (JSON-able) logging.
   * ``post_with_retry``                    - HTTP POST with exponential backoff.
   * ``env_int`` / ``env_float`` / ``env_bool`` - safe env-var parsing.
+  * ``Metrics``                            - tiny in-process counter registry that
+                                             renders a Prometheus text endpoint.
+  * ``validate_video_input``               - shared input validation / size limit.
 """
 
 import json
 import logging
 import os
 import sys
+import threading
 import time
+from pathlib import Path
 
 try:  # requests is available in every service image
     import requests
 except Exception:  # pragma: no cover - defensive, keeps import side-effect free
     requests = None
+
+
+# Video container extensions accepted across the pipeline. Kept here so every
+# service validates against the same list (previously each service hard-coded a
+# slightly different set, e.g. the scraper omitted ``.m4v``).
+SUPPORTED_VIDEO_EXTENSIONS = {
+    ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -45,26 +58,43 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+_LOGGING_CONFIGURED = False
+_LOGGING_LOCK = threading.Lock()
+
+
 def configure_logging(service_name):
     """Configure root logging once, honouring the ``LOG_LEVEL`` env var.
 
     When ``LOG_FORMAT=json`` (the default) records are emitted as JSON lines;
     set ``LOG_FORMAT=plain`` for human-friendly output.
+
+    This is idempotent: the root handler is installed exactly once even if
+    ``get_logger`` is called from several modules, so log lines are never
+    duplicated.
     """
+    global _LOGGING_CONFIGURED
+
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
 
-    handler = logging.StreamHandler(sys.stdout)
-    if os.getenv("LOG_FORMAT", "json").lower() == "json":
-        handler.setFormatter(_JsonFormatter())
-    else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
-        )
-
-    root = logging.getLogger()
-    root.handlers = [handler]
-    root.setLevel(level)
+    with _LOGGING_LOCK:
+        if not _LOGGING_CONFIGURED:
+            handler = logging.StreamHandler(sys.stdout)
+            if os.getenv("LOG_FORMAT", "json").lower() == "json":
+                handler.setFormatter(_JsonFormatter())
+            else:
+                handler.setFormatter(
+                    logging.Formatter(
+                        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+                    )
+                )
+            root = logging.getLogger()
+            root.handlers = [handler]
+            root.setLevel(level)
+            _LOGGING_CONFIGURED = True
+        else:
+            # Keep the level in sync if the env changed between calls.
+            logging.getLogger().setLevel(level)
 
     logger = logging.getLogger(service_name)
     # Inject the service name into every record from this logger.
@@ -99,6 +129,123 @@ def env_bool(name, default=False):
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def human_size(num_bytes):
+    """Render a byte count as a short human-readable string (e.g. ``17.0 MB``)."""
+    if num_bytes is None:
+        return "unknown"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+
+
+# --------------------------------------------------------------------------- #
+# Input validation / size limits
+# --------------------------------------------------------------------------- #
+def validate_video_input(video_path, max_size_mb=None, extensions=None):
+    """Validate a video path before expensive ffmpeg/Whisper work begins.
+
+    Checks, in order:
+      * the path is non-empty,
+      * the file exists on disk,
+      * the extension is one of ``extensions`` (default: the shared set),
+      * the file is not larger than ``max_size_mb`` (env ``MAX_VIDEO_SIZE_MB``,
+        default 0 = unlimited).
+
+    Returns ``(True, None)`` when valid, otherwise ``(False, reason)`` so the
+    caller can return a clear HTTP error instead of crashing deep inside ffmpeg.
+    """
+    if not video_path:
+        return False, "no video_path provided"
+
+    if extensions is None:
+        extensions = SUPPORTED_VIDEO_EXTENSIONS
+    if max_size_mb is None:
+        max_size_mb = env_int("MAX_VIDEO_SIZE_MB", 0)
+
+    path = Path(video_path)
+    if not path.exists():
+        return False, f"file not found: {path}"
+
+    suffix = path.suffix.lower()
+    if suffix not in extensions:
+        return False, (
+            f"unsupported input format '{path.suffix}'; "
+            f"supported: {sorted(extensions)}"
+        )
+
+    if max_size_mb and max_size_mb > 0:
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as exc:
+            return False, f"could not stat file: {exc}"
+        limit_bytes = max_size_mb * 1024 * 1024
+        if size_bytes > limit_bytes:
+            return False, (
+                f"file too large: {human_size(size_bytes)} exceeds limit "
+                f"{max_size_mb} MB"
+            )
+
+    return True, None
+
+
+# --------------------------------------------------------------------------- #
+# Lightweight in-process metrics (Prometheus text exposition)
+# --------------------------------------------------------------------------- #
+class Metrics:
+    """A tiny, thread-safe counter/gauge registry with Prometheus rendering.
+
+    Deliberately minimal (no external client library) so it can ship in every
+    service image. Use ``inc`` for monotonically increasing counters and
+    ``set_gauge`` for point-in-time values, then expose ``render()`` from a
+    ``/metrics`` route.
+    """
+
+    def __init__(self, service):
+        self.service = service
+        self._lock = threading.Lock()
+        self._counters = {}
+        self._gauges = {}
+        self._started = time.time()
+
+    def inc(self, name, amount=1):
+        with self._lock:
+            self._counters[name] = self._counters.get(name, 0) + amount
+
+    def set_gauge(self, name, value):
+        with self._lock:
+            self._gauges[name] = value
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "counters": dict(self._counters),
+                "gauges": dict(self._gauges),
+                "uptime_seconds": time.time() - self._started,
+            }
+
+    def render(self):
+        """Return Prometheus text-exposition formatted metrics."""
+        lines = []
+        label = f'{{service="{self.service}"}}'
+        with self._lock:
+            lines.append("# TYPE videoprocessor_uptime_seconds gauge")
+            lines.append(
+                f"videoprocessor_uptime_seconds{label} "
+                f"{time.time() - self._started:.1f}"
+            )
+            for name, value in sorted(self._counters.items()):
+                metric = f"videoprocessor_{name}"
+                lines.append(f"# TYPE {metric} counter")
+                lines.append(f"{metric}{label} {value}")
+            for name, value in sorted(self._gauges.items()):
+                metric = f"videoprocessor_{name}"
+                lines.append(f"# TYPE {metric} gauge")
+                lines.append(f"{metric}{label} {value}")
+        return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #

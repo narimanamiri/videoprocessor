@@ -31,8 +31,13 @@ n8n/n8n-data/
 shared-storage/input/*
 shared-storage/processing/*
 shared-storage/output/*
+shared-storage/failed/*
 
 # --- but always keep the .gitkeep placeholders so the dirs exist on clone ---
 !shared-storage/input/.gitkeep
 !shared-storage/processing/.gitkeep
 !shared-storage/output/.gitkeep
+!shared-storage/failed/.gitkeep
+
+# --- Local env file (use .env.example as the template) ---
+.env

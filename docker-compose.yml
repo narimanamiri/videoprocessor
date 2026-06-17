@@ -46,6 +46,11 @@ services:
       - LOG_FORMAT=json
       - SHORTS_DURATION_THRESHOLD=60
       - HTTP_MAX_RETRIES=3
+      # Reject inputs larger than this many MB before ffmpeg (0 = unlimited).
+      - MAX_VIDEO_SIZE_MB=0
+      # Output naming/format: <prefix><stem>.<container>
+      - OUTPUT_PREFIX=processed_
+      - OUTPUT_CONTAINER=mp4
     ports:
       - "5000:5000"
     restart: unless-stopped
@@ -76,6 +81,7 @@ services:
       - LOG_FORMAT=json
       - WHISPER_MODEL=base
       - HTTP_MAX_RETRIES=3
+      - MAX_VIDEO_SIZE_MB=0
     ports:
       - "5002:5002"
     restart: unless-stopped
@@ -109,6 +115,8 @@ services:
       - LOG_LEVEL=INFO
       - LOG_FORMAT=json
       - HTTP_MAX_RETRIES=3
+      # Reject transcripts longer than this many characters (0 = unlimited).
+      - MAX_TRANSCRIPT_CHARS=200000
     ports:
       - "11434:11434"
       - "5003:5003"

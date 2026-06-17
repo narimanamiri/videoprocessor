@@ -3,14 +3,21 @@ import os
 import shutil
 from pathlib import Path
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
-from common import get_logger, post_with_retry, env_int
+from common import (
+    get_logger,
+    post_with_retry,
+    env_int,
+    Metrics,
+    SUPPORTED_VIDEO_EXTENSIONS,
+)
 
 logger = get_logger("file-assembler")
 app = Flask(__name__)
+metrics = Metrics("file-assembler")
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm"}
+VIDEO_EXTENSIONS = set(SUPPORTED_VIDEO_EXTENSIONS)
 
 
 def _safe_stem(video_name):
@@ -137,10 +144,13 @@ class FileAssembler:
 
             logger.info("Final output assembled in %s (%s files)",
                         final_folder, len(results["files"]))
+            metrics.inc("assembler_assembled_total")
+            metrics.inc("assembler_files_total", len(results["files"]))
             return results
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error assembling final output")
+            metrics.inc("assembler_errors_total")
             return {"error": str(exc), "status": "error"}
 
     def send_to_next_step(self, result):
@@ -168,6 +178,11 @@ def assemble_files_endpoint():
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unhandled error in /assemble-files")
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics_endpoint():
+    return Response(metrics.render(), mimetype="text/plain; version=0.0.4")
 
 
 @app.route("/health", methods=["GET"])

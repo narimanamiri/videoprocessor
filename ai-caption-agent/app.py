@@ -2,12 +2,16 @@ import os
 import time
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
-from common import get_logger, post_with_retry, env_int, env_float
+from common import get_logger, post_with_retry, env_int, env_float, Metrics
 
 logger = get_logger("ai-caption-agent")
 app = Flask(__name__)
+metrics = Metrics("ai-caption-agent")
+
+# Reject absurdly large transcripts up front (0 = unlimited).
+MAX_TRANSCRIPT_CHARS = env_int("MAX_TRANSCRIPT_CHARS", 200000)
 
 
 class AICaptionAgent:
@@ -78,7 +82,9 @@ class AICaptionAgent:
         generated_text = self.generate_with_ollama(prompt)
         if not generated_text:
             logger.warning("Empty AI response; using fallback captions")
+            metrics.inc("aicaption_fallback_total")
             return self._create_fallback_captions(video_name, video_type)
+        metrics.inc("aicaption_generated_total")
         return self._parse_response(generated_text, video_name, video_type)
 
     def _create_prompt(self, transcript, video_type, video_name, duration):
@@ -189,6 +195,15 @@ def generate_captions_endpoint():
         if not transcript:
             return jsonify({"error": "No transcript provided"}), 400
 
+        if MAX_TRANSCRIPT_CHARS and len(transcript) > MAX_TRANSCRIPT_CHARS:
+            metrics.inc("aicaption_rejected_total")
+            reason = (
+                f"transcript too long: {len(transcript)} chars exceeds limit "
+                f"{MAX_TRANSCRIPT_CHARS}"
+            )
+            logger.warning("Rejected /generate-captions request: %s", reason)
+            return jsonify({"error": reason, "status": "rejected"}), 400
+
         captions = ai_agent.generate_captions(
             transcript, video_type, video_name, duration
         )
@@ -199,6 +214,12 @@ def generate_captions_endpoint():
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unhandled error in /generate-captions")
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics_endpoint():
+    metrics.set_gauge("aicaption_model_loaded", int(ai_agent.model_loaded))
+    return Response(metrics.render(), mimetype="text/plain; version=0.0.4")
 
 
 @app.route("/health", methods=["GET"])

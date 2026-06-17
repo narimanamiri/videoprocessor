@@ -5,12 +5,20 @@ from pathlib import Path
 
 import ffmpeg
 import whisper
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
-from common import get_logger, post_with_retry, env_int
+from common import (
+    get_logger,
+    post_with_retry,
+    env_int,
+    Metrics,
+    validate_video_input,
+)
 
 logger = get_logger("caption-generator")
 app = Flask(__name__)
+metrics = Metrics("caption-generator")
+MAX_VIDEO_SIZE_MB = env_int("MAX_VIDEO_SIZE_MB", 0)
 
 
 class CaptionGenerator:
@@ -81,6 +89,7 @@ class CaptionGenerator:
             self.create_transcript_file(result["text"], transcript_path)
 
             logger.info("Subtitles generated: %s", srt_path)
+            metrics.inc("caption_subtitles_total")
             self._set_status(name, "subtitles_generated",
                              srt_path=str(srt_path))
 
@@ -94,6 +103,7 @@ class CaptionGenerator:
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error generating subtitles for %s", video_path)
+            metrics.inc("caption_errors_total")
             self._set_status(name, "error", error=str(exc))
             return {"error": str(exc), "status": "error"}
         finally:
@@ -146,6 +156,15 @@ def generate_subtitles_endpoint():
             return jsonify({"error": "No video path provided"}), 400
 
         target_video_path = processed_path if processed_path else video_path
+
+        ok, reason = validate_video_input(
+            target_video_path, max_size_mb=MAX_VIDEO_SIZE_MB
+        )
+        if not ok:
+            metrics.inc("caption_rejected_total")
+            logger.warning("Rejected /generate-subtitles request: %s", reason)
+            return jsonify({"error": reason, "status": "rejected"}), 400
+
         output_dir = os.getenv("OUTPUT_DIR", "/app/output")
 
         logger.info("Generating subtitles for: %s", target_video_path)
@@ -172,6 +191,12 @@ def status_endpoint():
             return jsonify({"error": "unknown job", "name": name}), 404
         return jsonify({"name": name, **job})
     return jsonify({"jobs": generator.get_status()})
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics_endpoint():
+    metrics.set_gauge("caption_jobs_tracked", len(generator.get_status()))
+    return Response(metrics.render(), mimetype="text/plain; version=0.0.4")
 
 
 @app.route("/health", methods=["GET"])
