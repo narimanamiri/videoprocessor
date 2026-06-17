@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   video-scraper:
-    build: ./video-scraper
+    build:
+      context: .
+      dockerfile: video-scraper/Dockerfile
     volumes:
       - ./shared-storage/input:/app/input
       - ./shared-storage/processing:/app/processing
@@ -11,12 +13,27 @@ services:
       - INPUT_DIR=/app/input
       - PROCESSING_DIR=/app/processing
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/video-detected
+      - PORT=5001
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - HTTP_MAX_RETRIES=3
+      - FILE_STABLE_TIMEOUT=30
+    ports:
+      - "5001:5001"
     restart: unless-stopped
     networks:
       - video-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:5001/health', timeout=5).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   video-processor:
-    build: ./video-processor
+    build:
+      context: .
+      dockerfile: video-processor/Dockerfile
     volumes:
       - ./shared-storage/processing:/app/processing
       - ./shared-storage/output:/app/output
@@ -24,14 +41,29 @@ services:
       - PROCESSING_DIR=/app/processing
       - OUTPUT_DIR=/app/output
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/video-processed
+      - PORT=5000
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - SHORTS_DURATION_THRESHOLD=60
+      - HTTP_MAX_RETRIES=3
+    ports:
+      - "5000:5000"
     restart: unless-stopped
     networks:
       - video-network
     depends_on:
       - n8n
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:5000/health', timeout=5).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   caption-generator:
-    build: ./caption-generator
+    build:
+      context: .
+      dockerfile: caption-generator/Dockerfile
     volumes:
       - ./shared-storage/processing:/app/processing
       - ./shared-storage/output:/app/output
@@ -39,43 +71,85 @@ services:
       - PROCESSING_DIR=/app/processing
       - OUTPUT_DIR=/app/output
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/subtitles-generated
+      - PORT=5002
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - WHISPER_MODEL=base
+      - HTTP_MAX_RETRIES=3
+    ports:
+      - "5002:5002"
     restart: unless-stopped
     networks:
       - video-network
     depends_on:
       - n8n
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:5002/health', timeout=5).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   ai-caption-agent:
-    build: ./ai-caption-agent
+    build:
+      context: .
+      dockerfile: ai-caption-agent/Dockerfile
     volumes:
       - ./shared-storage/processing:/app/processing
       - ./shared-storage/output:/app/output
       - ai_models:/app/models
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_API_HOST=http://localhost:11434
+      - OLLAMA_MODEL=llama3.1:8b
       - PROCESSING_DIR=/app/processing
       - OUTPUT_DIR=/app/output
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/captions-generated
+      - PORT=5003
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - HTTP_MAX_RETRIES=3
     ports:
       - "11434:11434"
+      - "5003:5003"
     restart: unless-stopped
     networks:
       - video-network
     depends_on:
       - n8n
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:5003/health', timeout=5).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
 
   file-assembler:
-    build: ./file-assembler
+    build:
+      context: .
+      dockerfile: file-assembler/Dockerfile
     volumes:
       - ./shared-storage/output:/app/output
     environment:
       - OUTPUT_DIR=/app/output
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/files-assembled
+      - PORT=5004
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - HTTP_MAX_RETRIES=3
+    ports:
+      - "5004:5004"
     restart: unless-stopped
     networks:
       - video-network
     depends_on:
       - n8n
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:5004/health', timeout=5).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   n8n:
     image: n8nio/n8n

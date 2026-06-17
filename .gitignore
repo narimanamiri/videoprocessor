@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# --- Logs ---
+*.log
+
+# --- n8n local data ---
+n8n/n8n-data/
+
+# --- Media files (samples + generated output) ---
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wmv
+*.flv
+*.webm
+*.wav
+*.srt
+*.jpg
+*.jpeg
+
+# --- Shared-storage working dirs (keep the structure, ignore contents) ---
+shared-storage/input/*
+shared-storage/processing/*
+shared-storage/output/*
+
+# --- but always keep the .gitkeep placeholders so the dirs exist on clone ---
+!shared-storage/input/.gitkeep
+!shared-storage/processing/.gitkeep
+!shared-storage/output/.gitkeep

@@ -10,11 +10,12 @@ RUN apt-get update && apt-get install -y \
 # Install Ollama
 RUN curl -fsSL https://ollama.ai/install.sh | sh
 
-# Install Python dependencies
-COPY requirements.txt .
+# Build context is the repository root (see docker-compose.yml).
+COPY ai-caption-agent/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py start.sh ./
+COPY common.py ./
+COPY ai-caption-agent/app.py ai-caption-agent/start.sh ./
 
 # Make start script executable
 RUN chmod +x start.sh

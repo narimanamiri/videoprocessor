@@ -6,9 +6,11 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Build context is the repository root (see docker-compose.yml).
+COPY video-processor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+COPY common.py ./
+COPY video-processor/app.py ./
 
 CMD ["python", "app.py"]

@@ -9,10 +9,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt .
+# Build context is the repository root (see docker-compose.yml).
+COPY caption-generator/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+COPY common.py ./
+COPY caption-generator/app.py ./
 
 CMD ["python", "app.py"]
